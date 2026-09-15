@@ -53,9 +53,54 @@ first push. The payload is 5,000 bytes with a zero byte roughly every 256, and
 the check is a checksum over every byte received rather than a string compare —
 which is exactly the test that would not notice.
 
+## The oracle, recorded before the runtime is written
+
+`runc` is the oracle, so what it does was written down first. `oracle/` drives a
+Linux host with cgroup v2 (here the colima VM), builds a bundle, runs `runc`, and
+normalises what the container saw into `oracle/expected/<case>.txt`.
+
+```sh
+sh oracle/capture.sh basic       # re-record a case from runc
+```
+
+The rootfs comes from `docker export`, not from `mtar` — an oracle whose input is
+produced by the code under test cannot contradict it. Everything happens in the
+Linux host's own filesystem, never a mounted macOS directory, which keeps neither
+uid 0 nor a mode-000 file.
+
+**Namespace identifiers are not recorded raw.** They are inode numbers that
+change every run, so each is normalised to `new` or `host` by diffing against the
+host's own — which is the fact being claimed anyway.
+
+**The first capture was not reproducible.** `visible_pids` came back 4 on one run
+and 3 on the next: the count races with the subshells the observation script
+itself spawns. It is now `pid=1` (this process is init in its namespace) and
+`pids_few=yes` (the host's process table is not visible), both of which hold
+still. Three consecutive captures agree before a case is kept.
+
+### The cases, and what each one would catch
+
+Four cases, each isolating a different field — a single case would be passed by a
+runtime that hardcodes the defaults.
+
+| case | pins | a runtime that would pass everything else and fail here |
+|---|---|---|
+| `basic` | pid/mnt/net/uts/ipc/cgroup `new`, user `host`, `pid=1`, 20 mounts, `CapEff`, `nofile` | — the baseline |
+| `hostname` | `hostname=not-the-default` | one that creates a UTS namespace but never writes the name into it — the default *is* `runc`, so `basic` cannot see this |
+| `no_netns` | `ns.net=host` | one that creates all six namespaces unconditionally instead of reading the spec's list |
+| `exit42` | `runc.exit=42`, `cwd=/tmp`, `env_case=exit42` | one that always reports success |
+
+Pairwise they differ in every combination, so no case is redundant.
+
+### Not covered yet
+
+cgroup resource limits, the mount list beyond its length, seccomp, the full
+capability sets, rootless/user-namespace mode, and the `create`/`start` split
+(these all run through `runc run`). Each is a case to add when the runtime
+reaches it.
+
 ## What is next
 
 The runtime itself: `create` / `start` / `state` / `kill` / `delete` against the
-[OCI Runtime Specification](https://github.com/opencontainers/runtime-spec), with
-`runc` as the oracle — the same bundle handed to both, and everything observable
-compared: exit status, output, namespace inodes, cgroup paths and values.
+[OCI Runtime Specification](https://github.com/opencontainers/runtime-spec),
+checked against the recorded expectations above.

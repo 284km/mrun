@@ -1,0 +1,23 @@
+# recorded from runc by oracle/capture.sh -- do not hand-edit
+runc.exit=0
+begin=1
+uid=0
+gid=0
+hostname=not-the-default
+cwd=/
+pid=1
+pids_few=yes
+mount_count=20
+root=.dockerenv,bin,dev,etc,home,lib,media,mnt,observe.sh,opt,proc,root,run,sbin,srv,sys,tmp,usr,var,
+caps=0000000020000420
+nofile=1024
+env_case=unset
+end=1
+ns.pid=new
+ns.mnt=new
+ns.net=new
+ns.uts=new
+ns.ipc=new
+ns.cgroup=new
+ns.user=host
+cgroup=0::/;

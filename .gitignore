@@ -1,3 +1,5 @@
 .build/
 .build-*/
-*.tar
+oracle/.capture.raw
+oracle/.hostns
+oracle/.observed
