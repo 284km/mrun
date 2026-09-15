@@ -23,9 +23,13 @@ echo "obs.cgroup=$(cat /proc/self/cgroup 2>/dev/null | tr '\n' ';')"
 echo "obs.pid=$$"
 _n=$(ls -d /proc/[0-9]* 2>/dev/null | wc -l | tr -d ' ')
 if [ "$_n" -lt 16 ]; then echo "obs.pids_few=yes"; else echo "obs.pids_few=no"; fi
-echo "obs.mount_count=$(wc -l < /proc/self/mounts | tr -d ' ')"
+# The LIST, not the count. "20 vs 7" says a runtime is missing mounts; it does
+# not say which, and the count is equally satisfied by mounting the wrong ones.
+echo "obs.mounts=$(awk '{print $2}' /proc/self/mounts | sort | tr '\n' ',')"
 echo "obs.root=$(ls -A / 2>/dev/null | sort | tr '\n' ',')"
+echo "obs.dev=$(ls /dev 2>/dev/null | sort | tr '\n' ',')"
 echo "obs.caps=$(grep ^CapEff /proc/self/status | awk '{print $2}')"
+echo "obs.capbnd=$(grep ^CapBnd /proc/self/status | awk '{print $2}')"
 echo "obs.nofile=$(ulimit -n)"
 echo "obs.env_case=${MRUN_CASE:-unset}"
 echo "obs.end=1"

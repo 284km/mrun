@@ -3,3 +3,5 @@
 oracle/.capture.raw
 oracle/.hostns
 oracle/.observed
+oracle/.normalised
+oracle/.report.*

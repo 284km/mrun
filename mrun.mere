@@ -1,0 +1,316 @@
+// mrun.mere — an OCI runtime. `mrun run <id>` reads ./config.json and runs it.
+//
+// The oracle is runc: oracle/expected/*.txt is what runc did with the same
+// bundle, and oracle/check.sh compares field by field. Nothing here is designed
+// from the specification alone -- the specification says what a field means,
+// and runc says what the result looks like.
+
+import "json.mere";
+
+extern fn lx_flag: str -> int;
+extern fn lx_unshare: int -> int;
+extern fn lx_fork: unit -> int;
+extern fn lx_wait: int -> int;
+extern fn lx_mount: str -> str -> str -> int -> str -> int;
+extern fn lx_umount2: str -> int -> int;
+extern fn lx_mkdir: str -> int -> int;
+extern fn lx_chdir: str -> int;
+extern fn lx_sethostname: str -> int;
+extern fn lx_pivot_root: str -> str -> int;
+extern fn lx_av_reset: unit -> int;
+extern fn lx_av_push: str -> int;
+extern fn lx_ev_reset: unit -> int;
+extern fn lx_ev_push: str -> int;
+extern fn lx_execve: str -> int;
+extern fn lx_errno: unit -> int;
+extern fn lx_exists: str -> int;
+extern fn lx_is_dir: str -> int;
+extern fn lx_rmdir: str -> int;
+extern fn lx_cgroup_unified: unit -> int;
+extern fn lx_cap_reset: unit -> int;
+extern fn lx_cap_add: str -> str -> int;
+extern fn lx_cap_apply: unit -> int;
+extern fn lx_mknod: str -> int -> int -> int -> int;
+extern fn lx_symlink_at: str -> str -> int;
+
+let die = fn (what: str) ->
+  let _ = print_err ("mrun: " ++ what ++ " (errno " ++ show (lx_errno ()) ++ ")") in
+  exit 1;
+
+let must = fn (what: str) -> fn (rc: int) ->
+  if rc < 0 then die what else rc;
+
+// ---- reading the spec ----------------------------------------------------
+
+let rec assoc = fn (ps: (str * Json.json) list) -> fn (k: str) ->
+  match ps with
+  | [] -> Json.JNull
+  | [p, ...t] -> let (k2, v) = p in if k2 == k then v else assoc t k;
+
+let jget = fn (o: Json.json) -> fn (k: str) ->
+  match o with
+  | Json.JObj kvs -> assoc kvs k
+  | _ -> Json.JNull;
+
+let jstr = fn (v: Json.json) -> match v with | Json.JStr s -> s | _ -> "";
+let jarr = fn (v: Json.json) -> match v with | Json.JArr xs -> xs | _ -> [];
+
+let rec each = fn (xs: Json.json list) -> fn (f: Json.json -> unit) ->
+  match xs with
+  | [] -> ()
+  | [h, ...t] -> let _ = f h in each t f;
+
+let rec fold_str = fn (xs: Json.json list) -> fn (acc: int) -> fn (f: str -> int -> int) ->
+  match xs with
+  | [] -> acc
+  | [h, ...t] -> fold_str t (f (jstr h) acc) f;
+
+// ---- namespaces ----------------------------------------------------------
+
+// The spec names a namespace; the kernel wants a CLONE_ bit. An unknown name
+// is refused rather than folded into 0: silently not creating a namespace the
+// bundle asked for is the failure this whole exercise is trying to avoid.
+let ns_bit = fn (t: str) ->
+  if t == "pid" then lx_flag "CLONE_NEWPID"
+  else if t == "mount" then lx_flag "CLONE_NEWNS"
+  else if t == "network" then lx_flag "CLONE_NEWNET"
+  else if t == "uts" then lx_flag "CLONE_NEWUTS"
+  else if t == "ipc" then lx_flag "CLONE_NEWIPC"
+  else if t == "cgroup" then lx_flag "CLONE_NEWCGROUP"
+  else if t == "user" then lx_flag "CLONE_NEWUSER"
+  else die ("namespace type not implemented: " ++ t);
+
+let ns_mask = fn (spec: Json.json) ->
+  let rec go = fn (xs: Json.json list) -> fn (acc: int) ->
+    match xs with
+    | [] -> acc
+    | [h, ...t] -> go t (bit_or acc (ns_bit (jstr (jget h "type")))) in
+  go (jarr (jget (jget spec "linux") "namespaces")) 0;
+
+// ---- mounts --------------------------------------------------------------
+
+// -1 means "this option is not a flag", and the caller puts it in the data
+// string instead. mode=755 and size=65536k travel that way.
+let opt_flag = fn (o: str) ->
+  if o == "nosuid" then lx_flag "MS_NOSUID"
+  else if o == "noexec" then lx_flag "MS_NOEXEC"
+  else if o == "nodev" then lx_flag "MS_NODEV"
+  else if o == "ro" then lx_flag "MS_RDONLY"
+  else if o == "rw" then 0
+  else if o == "relatime" then lx_flag "MS_RELATIME"
+  else if o == "noatime" then lx_flag "MS_NOATIME"
+  else if o == "strictatime" then lx_flag "MS_STRICTATIME"
+  else if o == "nodiratime" then lx_flag "MS_NODIRATIME"
+  else if o == "bind" then lx_flag "MS_BIND"
+  else if o == "rbind" then bit_or (lx_flag "MS_BIND") (lx_flag "MS_REC")
+  else if o == "private" then lx_flag "MS_PRIVATE"
+  else if o == "rprivate" then bit_or (lx_flag "MS_PRIVATE") (lx_flag "MS_REC")
+  else 0 - 1;
+
+let mount_opts_flags = fn (opts: Json.json list) ->
+  fold_str opts 0 (fn (o: str) -> fn (acc: int) ->
+    let f = opt_flag o in if f < 0 then acc else bit_or acc f);
+
+let rec mount_opts_data = fn (opts: Json.json list) -> fn (acc: str) ->
+  match opts with
+  | [] -> acc
+  | [h, ...t] ->
+      let o = jstr h in
+      if opt_flag o < 0 then
+        mount_opts_data t (if str_len acc == 0 then o else acc ++ "," ++ o)
+      else mount_opts_data t acc;
+
+// Make every directory on a path, so a mount destination that the image does
+// not already contain still works.
+let mkdir_path = fn (p: str) ->
+  let n = str_len p in
+  let rec go = fn (i: int) ->
+    if i >= n then let _ = lx_mkdir p 493 in ()
+    else
+      let _ = if char_at p i == "/" then
+                (if i > 0 then let _ = lx_mkdir (substring p 0 i) 493 in () else ())
+              else () in
+      go (i + 1) in
+  go 0;
+
+let do_mount = fn (root: str) -> fn (m: Json.json) ->
+  let dest = jstr (jget m "destination") in
+  let src  = jstr (jget m "source") in
+  // `runc spec` writes the v1 spelling ("cgroup") because it cannot know where
+  // the bundle will run. On a unified host the kernel only has cgroup2, and
+  // runc substitutes it; asking the filesystem is the only honest way to tell.
+  let ty0  = jstr (jget m "type") in
+  let ty   = if ty0 == "cgroup" then (if lx_cgroup_unified () == 1 then "cgroup2" else ty0) else ty0 in
+  let opts = jarr (jget m "options") in
+  let tgt  = root ++ dest in
+  let _ = mkdir_path tgt in
+  let fl = mount_opts_flags opts in
+  let da = mount_opts_data opts "" in
+  let rc = lx_mount src tgt ty fl da in
+  // A mount the bundle asked for and the kernel refused is reported, with the
+  // destination named, and does not stop the rest: the first run of a new
+  // runtime needs to see all of them, not the first one.
+  if rc < 0 then
+    print_err ("mrun: mount " ++ dest ++ " (" ++ ty ++ ") failed, errno "
+               ++ show (lx_errno ()))
+  else ();
+
+// ---- the default devices -------------------------------------------------
+//
+// The container's /dev is a fresh tmpfs, so it is empty until this runs. The
+// runtime-spec calls these the default devices: every container gets them
+// whether or not the bundle lists any (this one lists none). The major/minor
+// pairs are Linux's fixed assignments.
+//
+// Character device, mode 0666: 0x2000 is S_IFCHR and 0666 is 438.
+
+let make_devices = fn (root: str) ->
+  let dev = fn (name: str) -> fn (maj: int) -> fn (min: int) ->
+    let rc = lx_mknod (root ++ "/dev/" ++ name) (bit_or 8192 438) maj min in
+    if rc < 0 then
+      print_err ("mrun: mknod /dev/" ++ name ++ " errno " ++ show (lx_errno ()))
+    else () in
+  let lnk = fn (target: str) -> fn (name: str) ->
+    let rc = lx_symlink_at target (root ++ "/dev/" ++ name) in
+    if rc < 0 then
+      print_err ("mrun: symlink /dev/" ++ name ++ " errno " ++ show (lx_errno ()))
+    else () in
+  let _ = dev "null"    1 3 in
+  let _ = dev "zero"    1 5 in
+  let _ = dev "full"    1 7 in
+  let _ = dev "random"  1 8 in
+  let _ = dev "urandom" 1 9 in
+  let _ = dev "tty"     5 0 in
+  let _ = lnk "/proc/self/fd"   "fd" in
+  let _ = lnk "/proc/self/fd/0" "stdin" in
+  let _ = lnk "/proc/self/fd/1" "stdout" in
+  let _ = lnk "/proc/self/fd/2" "stderr" in
+  let _ = lnk "/proc/kcore"     "core" in
+  let _ = lnk "pts/ptmx"        "ptmx" in
+  ();
+
+// ---- masked and readonly paths -------------------------------------------
+//
+// runc's rule, which the specification describes and the oracle confirms: a
+// masked path that is a DIRECTORY gets an empty read-only tmpfs over it, a
+// masked FILE gets /dev/null bound over it, and a path that does not exist is
+// skipped. Seven of this bundle's ten masked paths exist on this kernel.
+
+let mask_path = fn (root: str) -> fn (v: Json.json) ->
+  let p = jstr v in
+  let tgt = root ++ p in
+  if lx_exists tgt == 0 then ()
+  else if lx_is_dir tgt == 1 then
+    let rc = lx_mount "tmpfs" tgt "tmpfs"
+               (bit_or (lx_flag "MS_RDONLY") (lx_flag "MS_NOSUID")) "" in
+    if rc < 0 then print_err ("mrun: mask dir " ++ p ++ " errno " ++ show (lx_errno ())) else ()
+  else
+    let rc = lx_mount "/dev/null" tgt "" (lx_flag "MS_BIND") "" in
+    if rc < 0 then print_err ("mrun: mask file " ++ p ++ " errno " ++ show (lx_errno ())) else ();
+
+// A read-only path is a bind of the path onto itself, then a remount that adds
+// MS_RDONLY. One mount(2) with both flags does not do it: the read-only bit is
+// only honoured on the remount.
+let ro_path = fn (root: str) -> fn (v: Json.json) ->
+  let p = jstr v in
+  let tgt = root ++ p in
+  if lx_exists tgt == 0 then ()
+  else
+    let b = lx_mount tgt tgt "" (bit_or (lx_flag "MS_BIND") (lx_flag "MS_REC")) "" in
+    if b < 0 then print_err ("mrun: ro bind " ++ p ++ " errno " ++ show (lx_errno ()))
+    else
+      let r = lx_mount tgt tgt ""
+                (bit_or (bit_or (lx_flag "MS_BIND") (lx_flag "MS_REMOUNT")) (lx_flag "MS_RDONLY")) "" in
+      if r < 0 then print_err ("mrun: ro remount " ++ p ++ " errno " ++ show (lx_errno ())) else ();
+
+let each_set = fn (caps: Json.json) -> fn (which: str) ->
+  each (jarr (jget caps which)) (fn (v: Json.json) ->
+    let _ = must ("capability " ++ jstr v ++ " in " ++ which) (lx_cap_add which (jstr v)) in ());
+
+// ---- the child -----------------------------------------------------------
+
+let enter = fn (spec: Json.json) -> fn (bundle_root: str) ->
+  let mask = ns_mask spec in
+  let pidbit = lx_flag "CLONE_NEWPID" in
+  let rest = bit_and mask (bit_not pidbit) in
+  let _ = if rest != 0 then must "unshare" (lx_unshare rest) else 0 in
+
+  // Nothing we mount should propagate back to the host's tree.
+  let _ = must "mount / private"
+            (lx_mount "" "/" "" (bit_or (lx_flag "MS_REC") (lx_flag "MS_PRIVATE")) "") in
+  // pivot_root requires the new root to be a mount point of its own.
+  let _ = must "bind rootfs"
+            (lx_mount bundle_root bundle_root ""
+               (bit_or (lx_flag "MS_BIND") (lx_flag "MS_REC")) "") in
+
+  let _ = each (jarr (jget spec "mounts")) (do_mount bundle_root) in
+
+  let _ = make_devices bundle_root in
+  let _ = each (jarr (jget (jget spec "linux") "maskedPaths"))
+            (mask_path bundle_root) in
+  let _ = each (jarr (jget (jget spec "linux") "readonlyPaths"))
+            (ro_path bundle_root) in
+
+  let old = bundle_root ++ "/.mrun-oldroot" in
+  let _ = lx_mkdir old 448 in
+  let _ = must "chdir rootfs" (lx_chdir bundle_root) in
+  let _ = must "pivot_root" (lx_pivot_root "." ".mrun-oldroot") in
+  let _ = must "chdir /" (lx_chdir "/") in
+  let _ = must "umount oldroot" (lx_umount2 "/.mrun-oldroot" (lx_flag "MNT_DETACH")) in
+  // The pivot directory is ours, not the image's. Leaving it behind puts an
+  // entry in / that the image does not have, which is visible to anything that
+  // lists the root -- and was, in the first run against the oracle.
+  let _ = must "rmdir oldroot" (lx_rmdir "/.mrun-oldroot") in
+
+  let hn = jstr (jget spec "hostname") in
+  let _ = if str_len hn > 0 then must "sethostname" (lx_sethostname hn) else 0 in
+
+  let proc = jget spec "process" in
+  let cwd = jstr (jget proc "cwd") in
+  let _ = if str_len cwd > 0 then must "chdir cwd" (lx_chdir cwd) else 0 in
+
+  let caps = jget proc "capabilities" in
+  let _ = lx_cap_reset () in
+  let _ = each_set caps "effective" in
+  let _ = each_set caps "permitted" in
+  let _ = each_set caps "inheritable" in
+  let _ = each_set caps "bounding" in
+  let _ = each_set caps "ambient" in
+  let _ = must "capset" (lx_cap_apply ()) in
+
+  let _ = lx_av_reset () in
+  let _ = each (jarr (jget proc "args")) (fn (v: Json.json) ->
+            let _ = must "argv push" (lx_av_push (jstr v)) in ()) in
+  let _ = lx_ev_reset () in
+  let _ = each (jarr (jget proc "env")) (fn (v: Json.json) ->
+            let _ = must "envp push" (lx_ev_push (jstr v)) in ()) in
+
+  let argv0 = match jarr (jget proc "args") with
+              | [] -> die "process.args is empty"
+              | [h, ...t] -> jstr h in
+  let _ = lx_execve argv0 in
+  die ("execve " ++ argv0);
+
+// ---- entry ---------------------------------------------------------------
+
+let run = fn (id: str) ->
+  let spec = Json.parse_json (read_file "config.json") in
+  let root = jstr (jget (jget spec "root") "path") in
+  let bundle_root = if str_len root == 0 then "rootfs" else root in
+
+  // A PID namespace applies to CHILDREN of the unsharing process, so this one
+  // has to happen before the fork. The rest are unshared in the child, where
+  // they cannot disturb the process that has to survive to report the status.
+  let mask = ns_mask spec in
+  let pidbit = lx_flag "CLONE_NEWPID" in
+  let _ = if bit_and mask pidbit != 0 then must "unshare pid" (lx_unshare pidbit) else 0 in
+
+  let pid = must "fork" (lx_fork ()) in
+  if pid == 0 then enter spec bundle_root
+  else
+    let st = must "wait" (lx_wait pid) in
+    exit st;
+
+match args () with
+| ["run", id] -> run id
+| _ -> let _ = print_err "usage: mrun run <id>" in exit 2

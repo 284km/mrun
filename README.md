@@ -2,7 +2,52 @@
 
 An OCI runtime — `runc`'s job — written in [Mere](https://merelang.org/).
 
-**Nothing here runs a container yet.** What this repo currently holds is the
+It runs a container, and on the four recorded cases it agrees with `runc` on
+**96 of 96 compared fields**: the namespaces it enters, the twenty mounts it
+builds, the device nodes in `/dev`, the capability sets, the hostname, the
+working directory, the environment, and the exit status.
+
+```sh
+export MERE=/path/to/a/merelang/mere/checkout
+sh oracle/check.sh basic hostname no_netns exit42
+```
+
+```
+== basic ==     --> 24/24 fields match
+== hostname ==  --> 24/24 fields match
+== no_netns ==  --> 24/24 fields match
+== exit42 ==    --> 24/24 fields match
+TOTAL 96/96 fields across 4 case(s)
+```
+
+The check reports field by field rather than pass/fail, because a runtime being
+built is partially right and "23 of 24, and here is the one" is the number that
+says what to do next. The first run against the oracle scored 19 of 22.
+
+### What the poisons say
+
+A gate that reports 96/96 has to be able to report less. Four deliberate
+breakages, each failing in exactly one place:
+
+| break | what goes red |
+|---|---|
+| create all six namespaces instead of reading the spec's list | `no_netns` only, on `ns.net` |
+| never call `sethostname` | `hostname` in all four cases |
+| always exit 0 | `exit42` only, on the exit status |
+| never call `capset` | `caps` and `capbnd` in all four |
+
+The namespace poison is the one `basic` alone would have missed entirely.
+
+### Still missing
+
+cgroup resource limits (the container is not placed in a cgroup of its own),
+seccomp, rootless/user-namespace mode, the `create`/`start` split — `run` is the
+only verb — and `delete`/`state`/`kill`. Each is a case to record from runc
+first.
+
+## How it got here
+
+**Nothing ran a container when this repo started.** What this repo currently holds is the
 measurement that decides whether the runtime can be written at all, plus the
 one C file it will need. That ordering is deliberate: a runtime has to `fork`,
 keep running in the child, and then `exec` the container's process, and Mere is
@@ -101,6 +146,5 @@ reaches it.
 
 ## What is next
 
-The runtime itself: `create` / `start` / `state` / `kill` / `delete` against the
-[OCI Runtime Specification](https://github.com/opencontainers/runtime-spec),
-checked against the recorded expectations above.
+`create` / `start` / `state` / `kill` / `delete` as separate verbs, cgroup
+limits, and seccomp — each recorded from runc before it is written.
