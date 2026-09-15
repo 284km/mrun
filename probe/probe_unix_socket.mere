@@ -1,0 +1,98 @@
+// probe/probe_unix_socket.mere — P0.3.
+//
+// Can a Mere program serve and dial an AF_UNIX socket, and is the byte path
+// BINARY-SAFE? The second half is the one that matters: `docker.sock` carries
+// HTTP bodies, and a path that stops at the first zero byte would pass a
+// text smoke test and lose data on the first image push.
+//
+// The payload therefore contains zero bytes on purpose, and the check is a
+// checksum over every byte received -- not a string comparison, which is
+// exactly the test that would not notice.
+
+extern fn unix_listen: str -> int;
+extern fn unix_accept: int -> int;
+extern fn unix_connect: str -> int;
+extern fn tcp_read: int -> int -> int -> int;
+extern fn tcp_write: int -> int -> int -> int;
+extern fn tcp_close: int -> int;
+extern fn mem_alloc: int -> int;
+extern fn mem_set_u8: int -> int -> int -> int;
+extern fn mem_get_u8: int -> int -> int;
+extern fn proc_fork: unit -> int;
+extern fn proc_wait: int -> int;
+extern fn proc_exit: int -> int;
+
+let n_bytes = 5000;
+let sock = "/tmp/mere-p03.sock";
+
+// byte i is (i * 7 + 3) mod 256 -- which is 0 for 1 in 256 of them, so the
+// payload contains zero bytes throughout rather than only at the end.
+let byte_at = fn (i: int) -> (i * 7 + 3) % 256;
+
+let checksum = fn (p: int) -> fn (n: int) ->
+  let rec go = fn (i: int) -> fn (acc: int) ->
+    if i == n then acc
+    else go (i + 1) ((acc * 31 + mem_get_u8 p i) % 1000003) in
+  go 0 0;
+
+let expected = fn (unit_: unit) ->
+  let rec go = fn (i: int) -> fn (acc: int) ->
+    if i == n_bytes then acc
+    else go (i + 1) ((acc * 31 + byte_at i) % 1000003) in
+  go 0 0;
+
+let srv = unix_listen sock in
+let _ = if srv < 0 then
+          let _ = print ("P0.3 listen-FAILED rc=" ++ show srv) in exit 1
+        else () in
+let _ = print "P0.3 listening" in
+
+let pid = proc_fork () in
+
+if pid == 0 then
+  // child: dial and send the payload, zero bytes and all
+  let fd = unix_connect sock in
+  let _ = if fd < 0 then
+            let _ = print ("P0.3 connect-FAILED rc=" ++ show fd) in
+            let _ = proc_exit 1 in ()
+          else () in
+  let p = mem_alloc n_bytes in
+  let rec fill = fn (i: int) ->
+    if i == n_bytes then ()
+    else let _ = mem_set_u8 p i (byte_at i) in fill (i + 1) in
+  let _ = fill 0 in
+  let rec send = fn (off: int) ->
+    if off >= n_bytes then off
+    else
+      let w = tcp_write fd (p + off) (n_bytes - off) in
+      if w <= 0 then off else send (off + w) in
+  let sent = send 0 in
+  let _ = print ("P0.3 child-sent " ++ show sent) in
+  let _ = tcp_close fd in
+  let _ = proc_exit 0 in
+  ()
+else
+  let c = unix_accept srv in
+  let _ = if c < 0 then
+            let _ = print ("P0.3 accept-FAILED rc=" ++ show c) in exit 1
+          else () in
+  let q = mem_alloc (n_bytes + 16) in
+  let rec recv = fn (off: int) ->
+    if off >= n_bytes then off
+    else
+      let r = tcp_read c (q + off) (n_bytes - off) in
+      if r <= 0 then off else recv (off + r) in
+  let got = recv 0 in
+  let sum = checksum q got in
+  let want = expected () in
+  let _ = print ("P0.3 parent-received " ++ show got ++ " sum=" ++ show sum
+                 ++ " want=" ++ show want) in
+  let _ = if got == n_bytes then
+            (if sum == want then print "P0.3 binary-safe ok"
+             else print "P0.3 binary-safe FAILED checksum")
+          else print "P0.3 binary-safe FAILED short read" in
+  let _ = tcp_close c in
+  let _ = tcp_close srv in
+  let st = proc_wait pid in
+  let _ = print ("P0.3 parent-reaped status=" ++ show st) in
+  ()

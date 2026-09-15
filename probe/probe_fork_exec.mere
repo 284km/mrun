@@ -1,0 +1,44 @@
+// probe/probe_fork_exec.mere — P0.5.
+//
+// Can a Mere process fork, keep running AS MERE in the child, and then become
+// another program? P1 (the OCI runtime) cannot be written if any of those is
+// no, so this is measured before anything else is built.
+//
+// Four stages, each with its own marker on stdout. run.sh asserts on the exact
+// multiset of markers, so a stage that silently does not happen fails the probe
+// instead of looking green. The "begin" marker is the poison: if the child
+// inherits an unflushed stdout buffer, "begin" appears TWICE and run.sh fails.
+
+extern fn proc_fork: unit -> int;
+extern fn proc_getpid: unit -> int;
+extern fn proc_exec2: str -> str -> str -> int;
+extern fn proc_wait: int -> int;
+extern fn proc_exit: int -> int;
+
+// Stage 2's work: allocate in the CHILD, after the fork, through the ordinary
+// str path. If the runtime's allocator does not survive a fork, this is where
+// it shows.
+let rec build = fn (n: int) -> fn (acc: str) ->
+  if n == 0 then acc else build (n - 1) (acc ++ show n);
+
+let _ = print ("P0.5 begin pid=" ++ show (proc_getpid ())) in
+
+let pid = proc_fork () in
+
+if pid < 0 then
+  let _ = print "P0.5 fork-FAILED" in
+  ()
+else
+  if pid == 0 then
+    let s = build 200 "" in
+    let _ = print ("P0.5 child-alive len=" ++ show (str_len s)) in
+    let r = region R { str_len (build 200 "") } in
+    let _ = print ("P0.5 child-region len=" ++ show r) in
+    let rc = proc_exec2 "/bin/echo" "P0.5" "child-exec" in
+    let _ = print ("P0.5 child-exec-FAILED rc=" ++ show rc) in
+    let _ = proc_exit 9 in
+    ()
+  else
+    let st = proc_wait pid in
+    let _ = print ("P0.5 parent-reaped status=" ++ show st) in
+    ()
