@@ -219,3 +219,6 @@ int lx_symlink_at(const char *target, const char *path) {
     if (symlink(target, path) == 0) return okay(0);
     return errno == EEXIST ? okay(0) : fail();
 }
+
+/* Is this path an executable file? For resolving argv[0] against PATH. */
+int lx_can_exec(const char *p) { return access(p, X_OK) == 0 ? 1 : 0; }

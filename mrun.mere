@@ -22,6 +22,7 @@ extern fn lx_av_push: str -> int;
 extern fn lx_ev_reset: unit -> int;
 extern fn lx_ev_push: str -> int;
 extern fn lx_execve: str -> int;
+extern fn lx_can_exec: str -> int;
 extern fn lx_errno: unit -> int;
 extern fn lx_exists: str -> int;
 extern fn lx_is_dir: str -> int;
@@ -288,8 +289,35 @@ let enter = fn (spec: Json.json) -> fn (bundle_root: str) ->
   let argv0 = match jarr (jget proc "args") with
               | [] -> die "process.args is empty"
               | [h, ...t] -> jstr h in
-  let _ = lx_execve argv0 in
-  die ("execve " ++ argv0);
+  // A bundle may name its program without a path -- `docker run alpine echo hi`
+  // produces args ["echo","hi"] -- and execve does not search. runc resolves it
+  // against the PATH in the bundle's own environment, not the host's, so that
+  // is what happens here: the container's PATH, not this process's.
+  let path_env =
+    let rec find = fn (xs: Json.json list) ->
+      match xs with
+      | [] -> "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+      | [h, ...t] ->
+          let e = jstr h in
+          if str_index_of e "PATH=" == 0 then substring e 5 (str_len e) else find t in
+    find (jarr (jget proc "env")) in
+  let resolved =
+    if str_index_of argv0 "/" >= 0 then argv0
+    else
+      let n = str_len path_env in
+      let rec scan = fn (start: int) -> fn (i: int) ->
+        if i > n then ""
+        else if i == n then
+          (let c = substring path_env start i ++ "/" ++ argv0 in
+           if lx_can_exec c == 1 then c else "")
+        else if char_at path_env i == ":" then
+          (let c = substring path_env start i ++ "/" ++ argv0 in
+           if lx_can_exec c == 1 then c else scan (i + 1) (i + 1))
+        else scan start (i + 1) in
+      let r = scan 0 0 in
+      if str_len r == 0 then argv0 else r in
+  let _ = lx_execve resolved in
+  die ("execve " ++ resolved);
 
 // ---- entry ---------------------------------------------------------------
 
