@@ -155,7 +155,22 @@ let do_mount = fn (root: str) -> fn (m: Json.json) ->
   if rc < 0 then
     print_err ("mrun: mount " ++ dest ++ " (" ++ ty ++ ") failed, errno "
                ++ show (lx_errno ()))
-  else ();
+  else
+    // MS_RDONLY IS IGNORED ON THE INITIAL BIND. The kernel takes it on a
+    // remount and not before, so a bind asked for read-only came out writable
+    // -- silently: the container wrote through it and the file appeared on the
+    // host. A second call is the whole of the fix, and the difference between
+    // "ro" meaning something and meaning nothing.
+    let bindbit = lx_flag "MS_BIND" in
+    let robit = lx_flag "MS_RDONLY" in
+    if bit_and fl bindbit != 0 && bit_and fl robit != 0 then
+      let rc2 = lx_mount src tgt ""
+                  (bit_or (bit_or bindbit (lx_flag "MS_REMOUNT")) robit) "" in
+      if rc2 < 0 then
+        print_err ("mrun: remounting " ++ dest ++ " read-only failed, errno "
+                   ++ show (lx_errno ()) ++ " -- it is WRITABLE")
+      else ()
+    else ();
 
 // ---- the default devices -------------------------------------------------
 //
