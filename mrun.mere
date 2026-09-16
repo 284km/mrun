@@ -30,6 +30,9 @@ extern fn lx_exists: str -> int;
 extern fn lx_is_dir: str -> int;
 extern fn lx_rmdir: str -> int;
 extern fn lx_cgroup_unified: unit -> int;
+extern fn lx_cgroup_make: str -> int;
+extern fn lx_cgroup_set: str -> str -> str -> int;
+extern fn lx_cgroup_join: str -> int;
 extern fn lx_cap_reset: unit -> int;
 extern fn lx_cap_add: str -> str -> int;
 extern fn lx_cap_apply: unit -> int;
@@ -56,6 +59,7 @@ let jget = fn (o: Json.json) -> fn (k: str) ->
   | _ -> Json.JNull;
 
 let jstr = fn (v: Json.json) -> match v with | Json.JStr s -> s | _ -> "";
+let jint = fn (v: Json.json) -> match v with | Json.JNum x -> x | _ -> 0;
 let jarr = fn (v: Json.json) -> match v with | Json.JArr xs -> xs | _ -> [];
 
 let rec each = fn (xs: Json.json list) -> fn (f: Json.json -> unit) ->
@@ -265,7 +269,38 @@ let each_set = fn (caps: Json.json) -> fn (which: str) ->
 
 // ---- the child -----------------------------------------------------------
 
+// ---- the container's own cgroup -------------------------------------------
+//
+// A container with no cgroup of its own is in whoever started it. That is
+// three things at once: its memory and cpu cannot be limited, anything asking
+// what it uses can only see the whole session, and there is nothing to freeze.
+// All three are the same missing directory.
+//
+// Joined BEFORE the cgroup namespace is unshared: afterwards the path that
+// would have to be written is not the path that can be seen.
+let cg_apply = fn (spec: Json.json) ->
+  let path = jstr (jget (jget spec "linux") "cgroupsPath") in
+  if str_len path == 0 then ()
+  else if lx_cgroup_unified () != 1 then
+    // Named, not guessed. A v1 host has a tree per controller and none of the
+    // files written below exist there.
+    print_err "mrun: this host is not on cgroup v2; no cgroup was made"
+  else
+    let p = if substring path 0 1 == "/" then substring path 1 (str_len path) else path in
+    let _ = must ("make the cgroup " ++ p) (lx_cgroup_make p) in
+    let r = jget (jget spec "linux") "resources" in
+    let mem = jint (jget (jget r "memory") "limit") in
+    let _ = if mem > 0 then (let _ = lx_cgroup_set p "memory.max" (show mem) in ()) else () in
+    let pids = jint (jget (jget r "pids") "limit") in
+    let _ = if pids > 0 then (let _ = lx_cgroup_set p "pids.max" (show pids) in ()) else () in
+    let q = jint (jget (jget r "cpu") "quota") in
+    let per = let x = jint (jget (jget r "cpu") "period") in if x > 0 then x else 100000 in
+    let _ = if q > 0 then (let _ = lx_cgroup_set p "cpu.max" (show q ++ " " ++ show per) in ()) else () in
+    let _ = must ("join the cgroup " ++ p) (lx_cgroup_join p) in
+    ();
+
 let enter = fn (spec: Json.json) -> fn (bundle_root: str) ->
+  let _ = cg_apply spec in
   let mask = ns_mask spec in
   // Entering comes first: a namespace we were given is one somebody else has
   // already finished with, and the ones we make are made around it.

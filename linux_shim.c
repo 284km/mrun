@@ -265,3 +265,77 @@ int lx_setns(const char *path, int flag) {
     errno = e;
     return rc == 0 ? okay(0) : fail();
 }
+
+#include <stdio.h>
+/* ---- cgroups --------------------------------------------------------------
+ *
+ * A container with no cgroup of its own is in the daemon's, which means three
+ * things at once: its memory and cpu cannot be limited, `docker stats` can
+ * only report the whole session, and there is nothing to freeze. All three are
+ * the same missing directory.
+ *
+ * cgroup v2 only. v1 is a different tree per controller and this machine is
+ * unified; a host that is not says so rather than getting a guess.
+ */
+static int lx_cg_write(const char *path, const char *file, const char *value) {
+    char p[512];
+    if (snprintf(p, sizeof p, "/sys/fs/cgroup/%s/%s", path, file) >= (int)sizeof p) return -1;
+    int fd = open(p, O_WRONLY);
+    if (fd < 0) return fail();
+    ssize_t n = write(fd, value, strlen(value));
+    int e = errno;
+    close(fd);
+    errno = e;
+    return n > 0 ? okay(0) : fail();
+}
+
+/* A CHILD ONLY HAS THE CONTROLLERS ITS PARENT DELEGATES. In cgroup v2 a new
+ * directory has cgroup.freeze and cgroup.procs whatever happens, but
+ * memory.max and pids.max exist only if the PARENT lists those controllers in
+ * its cgroup.subtree_control. Without this the cgroup was made, freezing
+ * worked, and every limit was silently absent -- the files were not there to
+ * write. */
+static void lx_cg_delegate(const char *dir) {
+    char f[512];
+    if (snprintf(f, sizeof f, "%s/cgroup.subtree_control", dir) >= (int)sizeof f) return;
+    int fd = open(f, O_WRONLY);
+    if (fd < 0) return;
+    /* Best effort and one at a time: a host without one of them refuses the
+     * whole line, and then none of them are enabled. */
+    const char *want[] = {"+memory", "+pids", "+cpu"};
+    for (size_t i = 0; i < sizeof want / sizeof *want; i++) {
+        if (write(fd, want[i], strlen(want[i])) < 0) { /* already on, or absent */ }
+    }
+    close(fd);
+}
+
+int lx_cgroup_make(const char *path) {
+    char p[512];
+    if (snprintf(p, sizeof p, "/sys/fs/cgroup/%s", path) >= (int)sizeof p) return -1;
+    lx_cg_delegate("/sys/fs/cgroup");
+    /* every component, like mkdir -p: the caller names "mengd/<id>" and the
+     * middle directory is ours to make -- and to delegate through. */
+    for (char *q = p + strlen("/sys/fs/cgroup/"); *q; q++) {
+        if (*q == '/') {
+            *q = 0;
+            mkdir(p, 0755);
+            lx_cg_delegate(p);
+            *q = '/';
+        }
+    }
+    if (mkdir(p, 0755) != 0 && errno != EEXIST) return fail();
+    return okay(0);
+}
+
+int lx_cgroup_set(const char *path, const char *file, const char *value) {
+    return lx_cg_write(path, file, value);
+}
+
+/* The process joins by writing its OWN pid. Done before the cgroup namespace
+ * is unshared: afterwards the path it would have to write is not the path it
+ * can see. */
+int lx_cgroup_join(const char *path) {
+    char v[32];
+    snprintf(v, sizeof v, "%d", (int)getpid());
+    return lx_cg_write(path, "cgroup.procs", v);
+}
