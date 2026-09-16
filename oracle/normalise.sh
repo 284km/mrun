@@ -11,7 +11,16 @@
 # failure mode that makes an oracle useless.
 set -u
 obs="$1"; hostns="$2"
-grep -v '^obs\.rawns\.' "$obs" | grep -v '^obs\.cgroup=' | sed 's/^obs\.//'
+# The interface list is a FACT about a namespace we made or were given, and
+# whatever the machine happens to have when the namespace is the host's. Left
+# raw, the expectation records this machine at this moment -- two correct runs
+# disagree as soon as anything else on the box makes an interface, which is
+# what happened: a daemon under development left bridges behind and a recorded
+# expectation went stale without anything being wrong.
+hostnet=$(grep "^obs.rawns.net=" "$obs" | head -1 | cut -d= -f2-)
+theirnet=$(grep "^host.ns.net=" "$hostns" | head -1 | cut -d= -f2-)
+grep -v '^obs\.rawns\.' "$obs" | grep -v '^obs\.cgroup=' | sed 's/^obs\.//' \
+  | { if [ "$hostnet" = "$theirnet" ]; then sed 's/^netifs=.*/netifs=<the host\x27s>/'; else cat; fi; }
 for ns in pid mnt net uts ipc cgroup user; do
   mine=$(grep "^obs.rawns.$ns=" "$obs" | head -1 | cut -d= -f2-)
   theirs=$(grep "^host.ns.$ns=" "$hostns" | head -1 | cut -d= -f2-)
