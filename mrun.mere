@@ -330,7 +330,7 @@ let enter = fn (spec: Json.json) -> fn (bundle_root: str) ->
 
 // ---- entry ---------------------------------------------------------------
 
-let run = fn (id: str) ->
+let run = fn (id: str) -> fn (pidfile: str) ->
   let spec = Json.parse_json (read_file "config.json") in
   let root = jstr (jget (jget spec "root") "path") in
   let bundle_root = if str_len root == 0 then "rootfs" else root in
@@ -345,9 +345,16 @@ let run = fn (id: str) ->
   let pid = must "fork" (lx_fork ()) in
   if pid == 0 then enter spec bundle_root
   else
+    // The container's pid, for whoever started us. It is NOT this process's
+    // pid: this one supervises, and the namespaces belong to the child. A
+    // caller that wants to enter the container -- to forward a port into it,
+    // say -- needs the child's, and has no way to find it from outside.
+    let _ = if str_len pidfile > 0 then
+              (let _ = write_file pidfile (show pid) in ()) else () in
     let st = must "wait" (lx_wait pid) in
     exit st;
 
 match args () with
-| ["run", id] -> run id
-| _ -> let _ = print_err "usage: mrun run <id>" in exit 2
+| ["run", id] -> run id ""
+| ["run", id, pidfile] -> run id pidfile
+| _ -> let _ = print_err "usage: mrun run <id> [pid-file]" in exit 2
