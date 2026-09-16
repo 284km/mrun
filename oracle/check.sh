@@ -32,12 +32,28 @@ for c in "${@:-basic}"; do
   RUNTIME=/var/tmp/mrun CASE="$c" sh "$here/oracle/core.sh" || { echo "  FAIL  runner"; continue; }
   got="$here/oracle/.normalised"
   cases_run=$((cases_run + 1))
+  # Fields mrun is MEANT to differ from runc on. Empty, and the machinery stays
+  # because the first entry proposed for it turned out not to belong: `lo` was
+  # added on the assumption that runc leaves loopback down and everything above
+  # it brings loopback up. runc leaves it UP -- mrun was simply missing a step,
+  # and the staleness half of this check is what said so, by failing an entry
+  # that no longer differed. An allowance is a claim, and this one checks it.
+  DIVERGE=""
   grep -v '^#' "$exp" | while IFS= read -r line; do
     [ -n "$line" ] || continue
     k=${line%%=*}
     g=$(grep "^$k=" "$got" 2>/dev/null | head -1)
-    if [ "$g" = "$line" ]; then echo "  ok    $k"
-    else echo "  FAIL  $k  want[${line#*=}] got[${g#*=}]"; fi
+    case " $DIVERGE " in
+      *" $k "*)
+        if [ "$g" = "$line" ]; then
+          echo "  FAIL  $k  is on the deliberate-divergence list but matches runc now [${g#*=}]"
+        else
+          echo "  ok    $k  differs on purpose  runc[${line#*=}] mrun[${g#*=}]"
+        fi ;;
+      *)
+        if [ "$g" = "$line" ]; then echo "  ok    $k"
+        else echo "  FAIL  $k  want[${line#*=}] got[${g#*=}]"; fi ;;
+    esac
   done > "$here/oracle/.report.$c"
   cat "$here/oracle/.report.$c"
   t=$(grep -c . "$here/oracle/.report.$c"); m=$(grep -c '^  ok ' "$here/oracle/.report.$c" || true)

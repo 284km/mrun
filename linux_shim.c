@@ -222,3 +222,29 @@ int lx_symlink_at(const char *target, const char *path) {
 
 /* Is this path an executable file? For resolving argv[0] against PATH. */
 int lx_can_exec(const char *p) { return access(p, X_OK) == 0 ? 1 : 0; }
+
+/* ---- loopback ---------------------------------------------------------- */
+/*
+ * A freshly created network namespace has a loopback interface and it is DOWN.
+ * Nothing in the runtime-spec says to bring it up -- configuring the network is
+ * the layer above's job -- but a container with no working 127.0.0.1 is one
+ * where anything that talks to itself fails, and the failure looks like the
+ * application's, not the runtime's. runc leaves it down and every layer above
+ * runc brings it up; this is that step.
+ */
+#include <net/if.h>
+#include <sys/ioctl.h>
+#include <netinet/in.h>
+
+int lx_loopback_up(void) {
+    int s = socket(AF_INET, SOCK_DGRAM, 0);
+    if (s < 0) return fail();
+    struct ifreq ifr;
+    memset(&ifr, 0, sizeof ifr);
+    strncpy(ifr.ifr_name, "lo", IFNAMSIZ - 1);
+    if (ioctl(s, SIOCGIFFLAGS, &ifr) != 0) { int e = errno; close(s); errno = e; return fail(); }
+    ifr.ifr_flags |= IFF_UP | IFF_RUNNING;
+    if (ioctl(s, SIOCSIFFLAGS, &ifr) != 0) { int e = errno; close(s); errno = e; return fail(); }
+    close(s);
+    return okay(0);
+}

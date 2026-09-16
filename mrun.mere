@@ -23,6 +23,7 @@ extern fn lx_ev_reset: unit -> int;
 extern fn lx_ev_push: str -> int;
 extern fn lx_execve: str -> int;
 extern fn lx_can_exec: str -> int;
+extern fn lx_loopback_up: unit -> int;
 extern fn lx_errno: unit -> int;
 extern fn lx_exists: str -> int;
 extern fn lx_is_dir: str -> int;
@@ -243,6 +244,14 @@ let enter = fn (spec: Json.json) -> fn (bundle_root: str) ->
   let _ = must "bind rootfs"
             (lx_mount bundle_root bundle_root ""
                (bit_or (lx_flag "MS_BIND") (lx_flag "MS_REC")) "") in
+
+  // A new network namespace comes with loopback DOWN. Nothing in the spec says
+  // to raise it, and nothing in the container works without it.
+  let _ = if bit_and mask (lx_flag "CLONE_NEWNET") != 0 then
+            (let rc = lx_loopback_up () in
+             if rc < 0 then print_err ("mrun: could not bring up lo, errno "
+                                       ++ show (lx_errno ())) else ())
+          else () in
 
   let _ = each (jarr (jget spec "mounts")) (do_mount bundle_root) in
 

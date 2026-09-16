@@ -3,7 +3,7 @@
 An OCI runtime — `runc`'s job — written in [Mere](https://merelang.org/).
 
 It runs a container, and on the four recorded cases it agrees with `runc` on
-**96 of 96 compared fields**: the namespaces it enters, the twenty mounts it
+**100 of 100 compared fields**: the namespaces it enters, the twenty mounts it
 builds, the device nodes in `/dev`, the capability sets, the hostname, the
 working directory, the environment, and the exit status.
 
@@ -13,11 +13,11 @@ sh oracle/check.sh basic hostname no_netns exit42
 ```
 
 ```
-== basic ==     --> 24/24 fields match
-== hostname ==  --> 24/24 fields match
-== no_netns ==  --> 24/24 fields match
-== exit42 ==    --> 24/24 fields match
-TOTAL 96/96 fields across 4 case(s)
+== basic ==     --> 25/25 fields match
+== hostname ==  --> 25/25 fields match
+== no_netns ==  --> 25/25 fields match
+== exit42 ==    --> 25/25 fields match
+TOTAL 100/100 fields across 4 case(s)
 ```
 
 The check reports field by field rather than pass/fail, because a runtime being
@@ -37,6 +37,22 @@ breakages, each failing in exactly one place:
 | never call `capset` | `caps` and `capbnd` in all four |
 
 The namespace poison is the one `basic` alone would have missed entirely.
+
+### The field that could not tell the difference
+
+`lo` was added to the recorded observations to make a deliberate divergence
+visible: mrun brings loopback up, on the belief that runc leaves it down and
+every layer above runc raises it. Two things came out of writing that down.
+
+The first probe read `/sys/class/net/lo/operstate`, which says `unknown` for
+loopback whether it is up or down — loopback has no carrier. A field that cannot
+distinguish the two states would have recorded the divergence as absent. It
+reads the interface flags now (`0x8` down, `0x9` up).
+
+And then the divergence was not one. **runc leaves loopback UP.** mrun had been
+missing a step, not adding one, and what said so was the staleness half of the
+check — an allowance that no longer differed. The list is empty and the
+machinery stays, because an allowance is a claim and this is what checks it.
 
 ### Still missing
 

@@ -28,6 +28,14 @@ if [ "$_n" -lt 16 ]; then echo "obs.pids_few=yes"; else echo "obs.pids_few=no"; 
 echo "obs.mounts=$(awk '{print $2}' /proc/self/mounts | sort | tr '\n' ',')"
 echo "obs.root=$(ls -A / 2>/dev/null | sort | tr '\n' ',')"
 echo "obs.dev=$(ls /dev 2>/dev/null | sort | tr '\n' ',')"
+# Is loopback usable? runc leaves it down and every layer above runc brings it
+# up, so this is a field where a difference is expected -- and a field, rather
+# than a silent divergence, is the only way that is true on purpose.
+# The FLAGS, not operstate: loopback has no carrier, so its operstate reads
+# `unknown` whether it is up or down -- a field that cannot tell the two apart
+# and would have reported this divergence as absent. IFF_UP is 0x1, so 0x8 is
+# down and 0x9 is up.
+echo "obs.lo=$(cat /sys/class/net/lo/flags 2>/dev/null || echo unknown)"
 echo "obs.caps=$(grep ^CapEff /proc/self/status | awk '{print $2}')"
 echo "obs.capbnd=$(grep ^CapBnd /proc/self/status | awk '{print $2}')"
 echo "obs.nofile=$(ulimit -n)"

@@ -10,6 +10,7 @@ pids_few=yes
 mounts=/,/dev,/dev/mqueue,/dev/pts,/dev/shm,/proc,/proc/acpi,/proc/bus,/proc/fs,/proc/irq,/proc/kcore,/proc/keys,/proc/latency_stats,/proc/scsi,/proc/sys,/proc/sysrq-trigger,/proc/timer_list,/sys,/sys/firmware,/sys/fs/cgroup,
 root=.dockerenv,bin,dev,etc,home,lib,media,mnt,observe.sh,opt,proc,root,run,sbin,srv,sys,tmp,usr,var,
 dev=core,fd,full,mqueue,null,ptmx,pts,random,shm,stderr,stdin,stdout,tty,urandom,zero,
+lo=0x9
 caps=0000000020000420
 capbnd=0000000020000420
 nofile=1024
