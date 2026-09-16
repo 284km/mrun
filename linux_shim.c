@@ -248,3 +248,20 @@ int lx_loopback_up(void) {
     close(s);
     return okay(0);
 }
+
+/* Join a namespace that already exists, named by a path.
+ *
+ * The runtime-spec says a namespace entry with a `path` means ENTER that one
+ * rather than make a new one, and it is the only way to be handed a network
+ * that was set up BEFORE the container process started. A network configured
+ * afterwards is a race the container can lose: it may connect before the
+ * address exists, and it usually will not, which is worse than always. */
+int lx_setns(const char *path, int flag) {
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return fail();
+    int rc = setns(fd, flag);
+    int e = errno;
+    close(fd);
+    errno = e;
+    return rc == 0 ? okay(0) : fail();
+}

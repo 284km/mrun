@@ -11,6 +11,7 @@ mounts=/,/dev,/dev/mqueue,/dev/pts,/dev/shm,/proc,/proc/acpi,/proc/bus,/proc/fs,
 root=.dockerenv,bin,dev,etc,home,lib,media,mnt,observe.sh,opt,proc,root,run,sbin,srv,sys,tmp,usr,var,
 dev=core,fd,full,mqueue,null,ptmx,pts,random,shm,stderr,stdin,stdout,tty,urandom,zero,
 lo=0x9
+netifs=lo 
 caps=0000000020000420
 capbnd=0000000020000420
 nofile=1024

@@ -36,6 +36,11 @@ echo "obs.dev=$(ls /dev 2>/dev/null | sort | tr '\n' ',')"
 # and would have reported this divergence as absent. IFF_UP is 0x1, so 0x8 is
 # down and 0x9 is up.
 echo "obs.lo=$(cat /sys/class/net/lo/flags 2>/dev/null || echo unknown)"
+# Which network namespace this is, said in terms of what is IN it. A namespace
+# the bundle named by path was set up by whoever made it, and the interfaces
+# are the part a container can actually use; an inode proves identity and
+# nothing else.
+echo "obs.netifs=$(ls /sys/class/net 2>/dev/null | sort | tr '\n' ' ')"
 echo "obs.caps=$(grep ^CapEff /proc/self/status | awk '{print $2}')"
 echo "obs.capbnd=$(grep ^CapBnd /proc/self/status | awk '{print $2}')"
 echo "obs.nofile=$(ulimit -n)"

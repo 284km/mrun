@@ -11,6 +11,7 @@ mounts=/,/dev,/dev/mqueue,/dev/pts,/dev/shm,/proc,/proc/acpi,/proc/bus,/proc/fs,
 root=.dockerenv,bin,dev,etc,home,lib,media,mnt,observe.sh,opt,proc,root,run,sbin,srv,sys,tmp,usr,var,
 dev=core,fd,full,mqueue,null,ptmx,pts,random,shm,stderr,stdin,stdout,tty,urandom,zero,
 lo=0x9
+netifs=br-05fe1fab9515 br-2d045d967418 br-5847551b8894 br-ab83326e40bc br-b3588f876468 br-f8d68fea21e0 docker0 eth0 lo veth46d186a veth4b1a617 veth82bd0d5 vethe534736 vethe656ab8 
 caps=0000000020000420
 capbnd=0000000020000420
 nofile=1024

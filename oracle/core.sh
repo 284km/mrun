@@ -41,16 +41,29 @@ m = importlib.util.module_from_spec(sp); sp.loader.exec_module(m)
 json.dump(m.mutate(spec), open(p, "w"), indent=2)
 PYEOF
 
+# A network namespace that exists BEFORE the runtime runs, for the case that
+# asks to be put in one. Made here rather than in the case file so runc and
+# mrun are handed the same one, and with a dummy interface in it so "did you
+# join it" has an answer that is not an inode number.
+sudo ip netns delete mrun-oracle 2>/dev/null || true
+sudo ip netns add mrun-oracle
+sudo ip -n mrun-oracle link add probe0 type dummy
+
 echo "=== HOSTNS ==="
 for ns in pid mnt net uts ipc cgroup user; do
   echo "host.ns.\$ns=\$(sudo readlink /proc/1/ns/\$ns 2>/dev/null)"
 done
+# NOT readlink: /var/run/netns/<name> is a bind mount of an nsfs inode, not a
+# symlink, so readlink answers with nothing and every comparison against it is
+# quietly false. Ask a process that is IN the namespace instead.
+echo "host.ns.given=\$(sudo ip netns exec mrun-oracle readlink /proc/self/ns/net 2>/dev/null)"
 echo "=== RUN ==="
 set +e
 sudo $RUNTIME run mrun-oracle-$CASE
 rc=\$?; echo "=== EXIT=\$rc ==="
 sudo $RUNTIME delete -f mrun-oracle-$CASE 2>/dev/null
 sudo runc delete -f mrun-oracle-$CASE 2>/dev/null
+sudo ip netns delete mrun-oracle 2>/dev/null
 exit 0
 EOF
 

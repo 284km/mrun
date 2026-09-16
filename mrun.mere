@@ -9,6 +9,7 @@ import "json.mere";
 
 extern fn lx_flag: str -> int;
 extern fn lx_unshare: int -> int;
+extern fn lx_setns: str -> int -> int;
 extern fn lx_fork: unit -> int;
 extern fn lx_wait: int -> int;
 extern fn lx_mount: str -> str -> str -> int -> str -> int;
@@ -82,12 +83,30 @@ let ns_bit = fn (t: str) ->
   else if t == "user" then lx_flag "CLONE_NEWUSER"
   else die ("namespace type not implemented: " ++ t);
 
+// A namespace entry with a `path` means JOIN that one instead of making a new
+// one. It is the only way to hand a container a network that was configured
+// BEFORE its process started: anything set up afterwards is a race the
+// container can lose, and one it will usually win, which is worse than always
+// losing -- it makes the failure rare instead of visible.
+//
+// So the two lists are kept apart: what to create, and what to enter.
 let ns_mask = fn (spec: Json.json) ->
   let rec go = fn (xs: Json.json list) -> fn (acc: int) ->
     match xs with
     | [] -> acc
-    | [h, ...t] -> go t (bit_or acc (ns_bit (jstr (jget h "type")))) in
+    | [h, ...t] ->
+        go t (if str_len (jstr (jget h "path")) > 0 then acc
+              else bit_or acc (ns_bit (jstr (jget h "type")))) in
   go (jarr (jget (jget spec "linux") "namespaces")) 0;
+
+let ns_enter = fn (spec: Json.json) ->
+  let rec go = fn (xs: Json.json list) -> fn (acc: (str * str) list) ->
+    match xs with
+    | [] -> acc
+    | [h, ...t] ->
+        let p = jstr (jget h "path") in
+        go t (if str_len p == 0 then acc else (jstr (jget h "type"), p) :: acc) in
+  go (jarr (jget (jget spec "linux") "namespaces")) [];
 
 // ---- mounts --------------------------------------------------------------
 
@@ -248,6 +267,16 @@ let each_set = fn (caps: Json.json) -> fn (which: str) ->
 
 let enter = fn (spec: Json.json) -> fn (bundle_root: str) ->
   let mask = ns_mask spec in
+  // Entering comes first: a namespace we were given is one somebody else has
+  // already finished with, and the ones we make are made around it.
+  let rec join = fn (xs: (str * str) list) ->
+    match xs with
+    | [] -> 0
+    | [h, ...t] ->
+        let (ty, p) = h in
+        let _ = must ("enter the " ++ ty ++ " namespace at " ++ p) (lx_setns p (ns_bit ty)) in
+        join t in
+  let _ = join (ns_enter spec) in
   let pidbit = lx_flag "CLONE_NEWPID" in
   let rest = bit_and mask (bit_not pidbit) in
   let _ = if rest != 0 then must "unshare" (lx_unshare rest) else 0 in
@@ -261,7 +290,9 @@ let enter = fn (spec: Json.json) -> fn (bundle_root: str) ->
                (bit_or (lx_flag "MS_BIND") (lx_flag "MS_REC")) "") in
 
   // A new network namespace comes with loopback DOWN. Nothing in the spec says
-  // to raise it, and nothing in the container works without it.
+  // to raise it, and nothing in the container works without it. Only for one
+  // we MADE: a namespace we were handed was configured by whoever made it, and
+  // this is not the place to second-guess what is in it.
   let _ = if bit_and mask (lx_flag "CLONE_NEWNET") != 0 then
             (let rc = lx_loopback_up () in
              if rc < 0 then print_err ("mrun: could not bring up lo, errno "
